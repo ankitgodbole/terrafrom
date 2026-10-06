@@ -1,0 +1,217 @@
+# 🚀 Terraform + GitHub Actions & Azure OIDC Complete Guide
+
+A simple, end-to-end reference guide explaining how your CI/CD pipeline, scripts, Azure authentication, and secrets work together.
+
+---
+
+## 1. 🔄 Complete Workflow Flowchart
+
+```mermaid
+flowchart TD
+    Start([User clicks 'Run Workflow']) --> Inputs[Select Workspace & Action]
+    Inputs --> PlanJob[Job 1: PLAN - self-hosted runner]
+
+    subgraph PlanJobSteps [Plan Execution]
+        P1[Azure Login via OIDC] --> P2[terraform-backend-init.sh]
+        P2 --> P3[plan.sh]
+        P3 --> P4[Generate workspace.tfplan]
+        P4 --> P5[Upload .tfplan Artifact]
+    end
+
+    PlanJob --> PlanJobSteps
+
+    PlanJobSteps --> Decision{Action == 'apply' ?}
+    Decision -- No (plan only) --> EndDone([Finish: Preview Only])
+    Decision -- Yes --> ApprovalGate{Environment Approval Gate}
+
+    subgraph Approval [Optional Security Gate]
+        ApprovalGate -- Waiting for Approval --> Reviewer([Reviewer Approves in GitHub])
+    end
+
+    Reviewer --> ApplyJob[Job 2: APPLY - self-hosted runner]
+
+    subgraph ApplyJobSteps [Apply Execution]
+        A1[Download workspace.tfplan] --> A2[Azure Login via OIDC]
+        A2 --> A3[terraform-backend-init.sh]
+        A3 --> A4[apply.sh]
+        A4 --> A5[(Azure Cloud: Resources Created)]
+    end
+
+    ApplyJob --> ApplyJobSteps
+    ApplyJobSteps --> Done([Deployment Complete!])
+```
+
+---
+
+## 2. 📁 Folder Structure Expected by Workflow
+
+Aapke repo mein ye files aur folders hone chahiye:
+
+```text
+terraform/
+├── .github/
+│   └── workflows/
+│       └── terraform.yml               # GitHub Actions Pipeline
+├── environments/
+│   ├── app-field-vision-dev/
+│   │   └── terraform.tfvars            # Settings for Dev
+│   ├── hub-prod/
+│   │   └── terraform.tfvars            # Settings for Prod
+│   └── ... (one folder per workspace)
+└── scripts/
+    ├── terraform-backend-init.sh       # Storage / Backend connection
+    ├── plan.sh                         # Plan generator
+    └── apply.sh                        # Deployer
+```
+
+---
+
+## 3. 📜 Scripts ki Working (Short & Sweet)
+
+| Script | Kya karti hai? | Main Command | Output |
+| :--- | :--- | :--- | :--- |
+| **`terraform-backend-init.sh`** | Workspace ke naam ka container select karke Azure Storage se state connect karti hai. | `terraform init -reconfigure -backend-config="container_name=$WORKSPACE"` | State Connected |
+| **`plan.sh`** | Workspace ke `.tfvars` se Azure ko compare karti hai aur ek sealed blueprint file banati hai. | `terraform plan -var-file="$TFVARS" -out="$PLAN_FILE"` | `${WORKSPACE}.tfplan` |
+| **`apply.sh`** | Upar bani hui `.tfplan` file ko Azure par apply kar deti hai (Koi naya calculation nahi). | `terraform apply -input=false "$PLAN_FILE"` | Resources Deployed |
+
+---
+
+## 4. ☁️ Azure Setup (App Registration & OIDC)
+
+GitHub ko bina password Azure mein login karwane ke liye Azure Portal par 3 simple steps karne hote hain:
+
+### Step A: App Registration Banao
+1. Azure Portal kholein → **Microsoft Entra ID** (pehle Azure AD) par jayein.
+2. Left menu mein **App registrations** → **New registration** par click karein.
+3. Name daalein: `github-actions-terraform` → Click **Register**.
+4. Screen se **Application (client) ID** aur **Directory (tenant) ID** copy kar lein.
+
+### Step B: OIDC Trust Jodo (Federated Credential)
+1. Usi App Registration ke andar left menu mein **Certificates & secrets** par jayein.
+2. Upar **Federated credentials** tab par click karein → **Add credential**.
+3. Scenario mein select karein: **GitHub Actions deploying Azure resources**.
+4. Values bharein:
+   - **Organization**: `ankitgodbole` (Aapka GitHub username)
+   - **Repository**: `terrafrom` (Repo ka naam)
+   - **Entity type**: `Branch`
+   - **Branch name**: `main`
+   - **Name**: `github-actions-main-branch`
+5. Click **Add**. *(Ab GitHub aur Azure ki dosti ho gayi!)*
+
+### Step C: Azure Permissions (RBAC Roles)
+App Registration ko Subscriptions par access dena:
+1. **State File wali Subscription par:**
+   - Subscription → **Access Control (IAM)** → **Add role assignment**
+   - Role: **Storage Blob Data Contributor** (Storage Account ke container par ya Subscription par).
+2. **Resources wali Subscription par (Prod / Non-prod):**
+   - Subscription → **Access Control (IAM)** → **Add role assignment**
+   - Role: **Contributor**
+
+---
+
+## 5. 🔐 GitHub Secrets (Kahan aur Kaise Daalein)
+
+### Kahan jaakar add karna hai?
+1. GitHub Repo: `https://github.com/ankitgodbole/terrafrom`
+2. **Settings** (Top tab) → Left menu mein **Secrets and variables** → **Actions**.
+3. Click green button: **New repository secret**.
+
+### Kaun-kaun se Secrets add karne hain?
+
+| Secret Name | Value kahan se milegi? | Kiske liye use hota hai? |
+| :--- | :--- | :--- |
+| **`AZURE_CLIENT_ID`** | Azure App Registration → **Application (client) ID** | Azure login aur OIDC identity ke liye |
+| **`AZURE_TENANT_ID`** | Azure App Registration → **Directory (tenant) ID** | Company / Tenant pehchanne ke liye |
+| **`AZURE_CLIENT_SECRET`** | Azure App Registration → *Certificates & secrets* → *New client secret* | Terraform variables (`TF_VAR_client_secret`) ke liye |
+| **`QG_SHARED_CLIENT_ID`** | Shared App Registration ki Client ID | Sirf `spokes-*` workspaces ke liye |
+| **`QG_SHARED_CLIENT_SECRET`** | Shared App Registration ka Client Secret | Sirf `spokes-*` workspaces ke liye |
+
+---
+
+## 6. 🛡️ Environments & Approval Gate (Production Safety)
+
+1. Repo **Settings** → **Environments** → **New environment** → Name: `prod`.
+2. **Deployment protection rules** ke andar:
+   - ✅ Tick **Required reviewers**
+   - Reviewer ka GitHub username add karein.
+   - Click **Save protection rules**.
+3. Jab bhi koi `prod` workspace par `apply` chalayega, workflow plan banakar pause ho jayega aur approval maangega!
+
+---
+
+## 7. 🏢 Doosre Repo ka Self-Hosted Runner Apne Repo mein Kaise Use Karein?
+
+Company environments mein aksar ek hi VM par runner chalta hai jise multiple repositories share karti hain.
+
+### Case 1: Agar Runner Organization Level par hai (Best & Common)
+* Runner poori GitHub Organization ke liye registered hota hai.
+* **Aapko kya karna hai:** Apne GitHub Org Admin se bas itna bolna hai:
+  > *"Mere naye repo (`terrafrom`) ko us existing **Runner Group** mein access add kar do."*
+* Access milte hi aapke workflow mein `runs-on: self-hosted` likhte hi job automatically us VM par chali jayegi!
+
+### Case 2: Agar Runner sirf kisi doosre Specific Repo mein registered hai
+* Ek single runner application ek time par ek hi repo se register hota hai.
+* **Solution 1 (Recommended):** Admin se bolein ki us runner ko Repo-level se hata kar **Organization level** par shift kar de taaki saari repos share kar sakein.
+* **Solution 2:** Usi same VM par ek doosra folder bana kar (jaise `C:\actions-runner-repo2`) ek aur runner listener run karke aapke repo se connect kar diya jaye.
+
+---
+
+## 8. 🔑 Runner Authentication: Managed Identity (MSI) vs Plain VM
+
+Runner jis VM par chal raha hai, uske 2 alag-alag scenarios hote hain:
+
+```text
+                                [Runner VM]
+                                     │
+            ┌────────────────────────┴────────────────────────┐
+            ▼                                                 ▼
+[Scenario A: VM ke paas Managed Identity hai]     [Scenario B: VM ke paas Identity nahi hai]
+- Zero Secrets in GitHub                           - GitHub Secrets / OIDC zaroori
+- Azure se direct hardware authorization           - Har run par token/pass check hota hai
+```
+
+### 🟢 Scenario A: Agar VM ke paas Azure Managed Identity (MSI) HAI
+
+Agar company ne us VM par Azure **Managed Identity** enable kar rakhi hai, toh ye **sabse aasan aur secure** setup hai:
+
+#### 1. GitHub Secrets par kya asar padega?
+* ❌ `AZURE_CLIENT_SECRET` ki zaroorat **KHATAM** (Delete kar sakte hain).
+* ❌ `AZURE_TENANT_ID` ki zaroorat **KHATAM**.
+* ❌ `AZURE_CLIENT_ID` ki zaroorat **KHATAM** (System-Assigned mein kuch nahi chahiye).
+* **GitHub mein 0 secrets save karne padte hain!**
+
+#### 2. Workflow (`terraform.yml`) mein kya badalna hoga?
+```yaml
+# Azure Login step mein OIDC ki jagah IDENTITY use hoga:
+- name: Azure Login
+  uses: azure/login@v2
+  with:
+    auth-type: IDENTITY
+    subscription-id: ${{ steps.config.outputs.subscription_id }}
+
+# Backend Init & Plan steps mein:
+env:
+  ARM_USE_MSI: true     # OIDC ki jagah MSI
+  ARM_USE_AZUREAD: true
+```
+
+#### 3. Scripts mein kya badalna hoga?
+* **`scripts/terraform-backend-init.sh`:**
+  ```bash
+  # OIDC tokens check hatakar sirf ye likhein:
+  export ARM_USE_MSI=true
+  export ARM_USE_AZUREAD=true
+  ```
+* **`scripts/plan.sh` & `apply.sh`:**
+  - Password check (`: "${TF_VAR_client_secret:?..."}`) hata dein, kyunki Managed Identity mein koi password hota hi nahi hai.
+
+---
+
+### 🔴 Scenario B: Agar VM ke paas Identity NAHI HAI (Plain VM)
+
+Agar VM sirf ek basic server hai:
+* VM ke paas Azure ka koi direct power nahi hota.
+* Is case mein aapka **current OIDC setup** chalega:
+  1. Runner job receive karega.
+  2. GitHub OIDC pass (token) aur repo ke secrets use karke Azure mein login karega.
+  3. Kaam khatam hone par access token band ho jayega.

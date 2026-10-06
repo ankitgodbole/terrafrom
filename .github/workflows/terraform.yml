@@ -1,93 +1,210 @@
-# This workflow installs the latest version of Terraform CLI and configures the Terraform CLI configuration file
-# with an API token for Terraform Cloud (app.terraform.io). On pull request events, this workflow will run
-# `terraform init`, `terraform fmt`, and `terraform plan` (speculative plan via Terraform Cloud). On push events
-# to the "main" branch, `terraform apply` will be executed.
-#
-# Documentation for `hashicorp/setup-terraform` is located here: https://github.com/hashicorp/setup-terraform
-#
-# To use this workflow, you will need to complete the following setup steps.
-#
-# 1. Create a `main.tf` file in the root of this repository with the `remote` backend and one or more resources defined.
-#   Example `main.tf`:
-#     # The configuration for the `remote` backend.
-#     terraform {
-#       backend "remote" {
-#         # The name of your Terraform Cloud organization.
-#         organization = "example-organization"
-#
-#         # The name of the Terraform Cloud workspace to store Terraform state files in.
-#         workspaces {
-#           name = "example-workspace"
-#         }
-#       }
-#     }
-#
-#     # An example resource that does nothing.
-#     resource "null_resource" "example" {
-#       triggers = {
-#         value = "A example resource that does nothing!"
-#       }
-#     }
-#
-#
-# 2. Generate a Terraform Cloud user API token and store it as a GitHub secret (e.g. TF_API_TOKEN) on this repository.
-#   Documentation:
-#     - https://www.terraform.io/docs/cloud/users-teams-organizations/api-tokens.html
-#     - https://help.github.com/en/actions/configuring-and-managing-workflows/creating-and-storing-encrypted-secrets
-#
-# 3. Reference the GitHub secret in step using the `hashicorp/setup-terraform` GitHub Action.
-#   Example:
-#     - name: Setup Terraform
-#       uses: hashicorp/setup-terraform@v1
-#       with:
-#         cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
-
-name: 'Terraform'
+name: Terraform Infrastructure
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      workspace:
+        description: Terraform workspace
+        required: true
+        type: choice
+        options:
+          - app-field-vision-dev
+          - app-field-vision-prod
+          - app-field-vision-qa
+          - app-max-nprd
+          - app-max-prod
+          - app-mfix-dev
+          - app-mfix-prod
+          - app-mfix-qa
+          - app-miq-dev
+          - app-miq-prod
+          - app-miq-qa
+          - app-mtid-nprd
+          - app-mtid-prod
+          - app-neo-dev
+          - app-neo-prod
+          - app-neo-qa
+          - app-qwest-dev
+          - app-qwest-prod
+          - app-qwest-qa
+          - hub-nprd
+          - hub-prod
+          - spokes-nprd
+          - spokes-prod
+          - temp-sec-hub-nprd
+      action:
+        description: Terraform action
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
 
 permissions:
+  id-token: write
   contents: read
 
-jobs:
-  terraform:
-    name: 'Terraform'
-    runs-on: ubuntu-latest
-    environment: production
+env:
+  TF_IN_AUTOMATION: true
 
-    # Use the Bash shell regardless whether the GitHub Actions runner is ubuntu-latest, macos-latest, or windows-latest
-    defaults:
-      run:
-        shell: bash
+concurrency:
+  group: terraform-${{ inputs.workspace }}
+  cancel-in-progress: false
+
+jobs:
+
+  plan:
+    name: Terraform Plan
+    runs-on: self-hosted
+
+    environment:
+      name: ${{ endsWith(inputs.workspace, '-dev') && 'dev' || endsWith(inputs.workspace, '-qa') && 'qa' || endsWith(inputs.workspace, '-nprd') && 'nprd' || 'prod' }}
+
+    outputs:
+      workspace: ${{ steps.config.outputs.workspace }}
+      environment: ${{ steps.config.outputs.environment }}
+      subscription_id: ${{ steps.config.outputs.subscription_id }}
 
     steps:
-    # Checkout the repository to the GitHub Actions runner
-    - name: Checkout
-      uses: actions/checkout@v4
 
-    # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v1
-      with:
-        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
-    - name: Terraform Init
-      run: terraform init
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
-    # Checks that all Terraform configuration files adhere to a canonical format
-    - name: Terraform Format
-      run: terraform fmt -check
+      - name: Configure Workspace
+        id: config
+        shell: bash
+        run: |
+          WORKSPACE="${{ inputs.workspace }}"
 
-    # Generates an execution plan for Terraform
-    - name: Terraform Plan
-      run: terraform plan -input=false
+          case "$WORKSPACE" in
+            *-dev)  ENVIRONMENT="dev" ;;
+            *-qa)   ENVIRONMENT="qa" ;;
+            *-nprd) ENVIRONMENT="nprd" ;;
+            *-prod) ENVIRONMENT="prod" ;;
+            *)
+              echo "Invalid workspace"
+              exit 1
+              ;;
+          esac
 
-      # On push to "main", build or change infrastructure according to Terraform configuration files
-      # Note: It is recommended to set up a required "strict" status check in your repository for "Terraform Cloud". See the documentation on "strict" required status checks for more information: https://help.github.com/en/github/administering-a-repository/types-of-required-status-checks
-    - name: Terraform Apply
-      if: github.ref == 'refs/heads/"main"' && github.event_name == 'push'
-      run: terraform apply -auto-approve -input=false
+          case "$WORKSPACE" in
+            hub-*|temp-sec-hub-*)
+              SUBSCRIPTION_ID="bbdd541c-ac30-44a8-b251-6ceb0006dda0"
+              ;;
+            *-prod)
+              SUBSCRIPTION_ID="d295d8ec-ed35-4e10-b1a1-3341172cd12b"
+              ;;
+            *)
+              SUBSCRIPTION_ID="bf123e28-0e1e-4698-9178-3489e42b1527"
+              ;;
+          esac
+
+          TFVARS="environments/${WORKSPACE}/terraform.tfvars"
+
+          if [ ! -f "$TFVARS" ]; then
+            echo "Missing $TFVARS"
+            exit 1
+          fi
+
+          echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
+          echo "environment=$ENVIRONMENT" >> "$GITHUB_OUTPUT"
+          echo "subscription_id=$SUBSCRIPTION_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.config.outputs.subscription_id }}
+
+      - name: Terraform Backend Init
+        shell: bash
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_USE_OIDC: true
+          ARM_USE_AZUREAD: true
+        run: |
+          chmod +x scripts/terraform-backend-init.sh
+          ./scripts/terraform-backend-init.sh "${{ inputs.workspace }}"
+
+      - name: Terraform Plan
+        shell: bash
+        env:
+          TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+          TF_VAR_client_secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_subscription_id: ${{ steps.config.outputs.subscription_id }}
+          TF_VAR_qg_shared_client_id: ${{ secrets.QG_SHARED_CLIENT_ID }}
+          TF_VAR_qg_shared_client_secret: ${{ secrets.QG_SHARED_CLIENT_SECRET }}
+        run: |
+          chmod +x scripts/plan.sh
+          ./scripts/plan.sh "${{ inputs.workspace }}"
+
+      - name: Upload Plan
+        if: inputs.action == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.workspace }}-${{ github.run_id }}
+          path: "${{ inputs.workspace }}.tfplan"
+          retention-days: 1
+
+
+  apply:
+    name: Terraform Apply
+    needs: plan
+    if: inputs.action == 'apply'
+
+    runs-on: self-hosted
+
+    environment:
+      name: ${{ needs.plan.outputs.environment }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ needs.plan.outputs.subscription_id }}
+
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ needs.plan.outputs.workspace }}-${{ github.run_id }}
+
+      - name: Terraform Backend Init
+        shell: bash
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_USE_OIDC: true
+          ARM_USE_AZUREAD: true
+        run: |
+          chmod +x scripts/terraform-backend-init.sh
+          ./scripts/terraform-backend-init.sh \
+            "${{ needs.plan.outputs.workspace }}"
+
+      - name: Terraform Apply
+        shell: bash
+        env:
+          TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+          TF_VAR_client_secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_subscription_id: ${{ needs.plan.outputs.subscription_id }}
+          TF_VAR_qg_shared_client_id: ${{ secrets.QG_SHARED_CLIENT_ID }}
+          TF_VAR_qg_shared_client_secret: ${{ secrets.QG_SHARED_CLIENT_SECRET }}
+        run: |
+          chmod +x scripts/apply.sh
+          ./scripts/apply.sh \
+            "${{ needs.plan.outputs.workspace }}" 
