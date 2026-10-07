@@ -1,24 +1,31 @@
-name: Manual Test
+name: Container Build and Deploy Test
 
 on:
   workflow_dispatch:
-    inputs:
-      custom_message:
-        description: Message to print
-        required: false
-        default: Hello from the manual test workflow
+
+permissions:
+  contents: read
 
 jobs:
-  test:
-    name: Run manual test
+  container-test:
+    name: Build and run container
     runs-on: ubuntu-latest
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Run test
-        env:
-          CUSTOM_MESSAGE: ${{ inputs.custom_message }}
+      - name: Build container image
+        run: docker build --tag sample-web:${{ github.sha }} .
+
+      - name: Run container
+        run: docker run --detach --name sample-web --publish 8080:80 sample-web:${{ github.sha }}
+
+      - name: Test deployed container
         run: |
-          echo "$CUSTOM_MESSAGE"
-          echo "Manual workflow ran successfully."
+          response=$(curl --fail --retry 10 --retry-connrefused --retry-delay 2 http://127.0.0.1:8080/)
+          printf '%s' "$response" | grep -q "Container pipeline test"
+
+      - name: Stop container
+        if: always()
+        run: docker rm --force sample-web
