@@ -1,45 +1,24 @@
-name: Test GitHub Actions Workflow
+name: Manual Test
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
     inputs:
       custom_message:
-        description: "A custom test message to print"
+        description: Message to print
         required: false
-        default: "Hello from manual trigger!"
+        default: Hello from the manual test workflow
 
 jobs:
-  test-run:
-    name: Run Test Steps
+  test:
+    name: Run manual test
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check out repository code
+      - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Run a one-line script
-        run: echo "GitHub Actions workflow executed successfully!"
-
-      - name: Print event details and context
+      - name: Run test
+        env:
+          CUSTOM_MESSAGE: ${{ inputs.custom_message }}
         run: |
-          echo "Triggered by event: ${{ github.event_name }}"
-          echo "Triggered by actor: ${{ github.actor }}"
-          echo "Git commit SHA: ${{ github.sha }}"
-          echo "Repository: ${{ github.repository }}"
-          echo "Workflow Run ID: ${{ github.run_id }}"
-
-      - name: Print custom message (if manually triggered)
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          echo "Custom message: ${{ inputs.custom_message }}"
-
-      - name: Run multi-line test checks
-        run: |
-          echo "Current Date & Time: $(date)"
-          echo "Runner OS: $(uname -s)"
-          echo "Runner Architecture: $(uname -m)"
-          ls -la
+          echo "$CUSTOM_MESSAGE"
+          echo "Manual workflow ran successfully."
